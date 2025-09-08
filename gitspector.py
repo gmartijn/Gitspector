@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-repo_checksum_sqlite.py — compute & persist Git checksums; auto-compare on rescan; history + custom baselines.
+gitspector.py — compute & persist Git checksums; auto-compare on rescan; history + custom baselines.
 
 Usage:
-  python repo_checksum_sqlite.py <path-or-url> [--include-untracked] [--algo sha256]
-                                 [--db ./repo_checksum.db] [--label NAME]
-                                 [--show-history] [--baseline-id ID] [--baseline-mode latest|first]
-                                 [--keep-clone]
+  python gitspector.py <path-or-url> [--include-untracked] [--algo sha256]
+                       [--db ./gitspector.db] [--label NAME]
+                       [--show-history] [--baseline-id ID] [--baseline-mode latest|first]
+                       [--keep-clone]
 
 Key behavior:
 - <path-or-url> can be local path OR remote Git URL (https/ssh). URLs are cloned to a temp dir.
@@ -14,7 +14,7 @@ Key behavior:
     * default baseline: latest previous scan for the same {identifier, label, algo, include_untracked}
     * --baseline-id: compare with the given past scan id (must have the same repo key)
     * --baseline-mode first: compare with the oldest scan for the same repo key
-- Default DB path: ./repo_checksum.db (in current working directory)
+- Default DB path: ./gitspector.db (in current working directory)
 - Exit codes:
     0 => unchanged vs chosen baseline
     1 => changed
@@ -51,7 +51,6 @@ def get_head_tree(cwd: Path) -> str:
     try:
         return run_git(["rev-parse", "HEAD^{tree}"], cwd)
     except subprocess.CalledProcessError:
-        # repository with no commits
         return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # Git's empty tree
 
 def get_index_tree(cwd: Path) -> str:
@@ -121,12 +120,8 @@ def git_status_porcelain(cwd: Path):
     return entries
 
 def clone_if_url(path_or_url: str) -> Tuple[Path, bool, str]:
-    """
-    If input is a URL, clone to temp dir (depth=1). Return (repo_path, is_temp, identifier).
-    identifier is the original URL for URLs, else the resolved absolute path string.
-    """
     if "://" in path_or_url or path_or_url.startswith("git@"):
-        tmpdir = Path(tempfile.mkdtemp(prefix="repo_checksum_"))
+        tmpdir = Path(tempfile.mkdtemp(prefix="gitspector_"))
         try:
             subprocess.run(
                 ["git", "clone", "--quiet", "--depth=1", path_or_url, str(tmpdir)],
@@ -147,11 +142,11 @@ DDL = """
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts_utc INTEGER NOT NULL,
-  repo_identifier TEXT NOT NULL,        -- URL string or absolute path (input identity)
-  repo_root TEXT NOT NULL,              -- resolved top-level work tree on disk
-  label TEXT NOT NULL,                  -- optional user label (defaults to "")
+  repo_identifier TEXT NOT NULL,
+  repo_root TEXT NOT NULL,
+  label TEXT NOT NULL,
   algo TEXT NOT NULL,
-  include_untracked INTEGER NOT NULL,   -- 0/1
+  include_untracked INTEGER NOT NULL,
   head_commit TEXT,
   head_tree TEXT NOT NULL,
   index_tree TEXT NOT NULL,
@@ -231,7 +226,7 @@ def main():
     ap.add_argument("path_or_url", help="Local repo path OR remote Git URL.")
     ap.add_argument("--include-untracked", action="store_true", help="Include untracked (not ignored) files in working checksum.")
     ap.add_argument("--algo", default="sha256", help="Hash algorithm (sha256, sha1, blake2b, etc.).")
-    ap.add_argument("--db", default=str(Path.cwd() / "repo_checksum.db"), help="SQLite DB file path (default: ./repo_checksum.db).")
+    ap.add_argument("--db", default=str(Path.cwd() / "gitspector.db"), help="SQLite DB file path (default: ./gitspector.db).")
     ap.add_argument("--label", default="", help="Optional label to segment baselines (e.g., 'prod', 'pre-commit').")
     ap.add_argument("--show-history", action="store_true", help="List previous scans for this repo key and exit.")
     ap.add_argument("--baseline-id", type=int, help="Compare against a specific historical scan ID (from --show-history).")
@@ -241,7 +236,6 @@ def main():
 
     repo, is_temp, identifier = clone_if_url(args.path_or_url)
 
-    # Open DB
     try:
         conn = open_db(Path(args.db))
     except Exception as e:
@@ -250,7 +244,6 @@ def main():
 
     include_untracked_flag = 1 if args.include_untracked else 0
 
-    # If not a repo and --show-history, we can still show history keyed by the identifier.
     if not in_git_repo(repo):
         if args.show_history:
             hist = list_history(conn, identifier, args.label, args.algo, include_untracked_flag)
@@ -266,10 +259,8 @@ def main():
             print(f"Error: '{repo}' is not inside a Git work tree.", file=sys.stderr)
             sys.exit(2)
 
-    # Normalize to repo root
     toplevel = Path(run_git(["rev-parse", "--show-toplevel"], repo)).resolve()
 
-    # Compute current hashes
     head_tree = get_head_tree(toplevel)
     index_tree = get_index_tree(toplevel)
 
@@ -284,7 +275,6 @@ def main():
     except subprocess.CalledProcessError:
         head_commit = "(no commits yet)"
 
-    # Show history & exit if requested
     if args.show_history:
         hist = list_history(conn, identifier, args.label, args.algo, include_untracked_flag)
         if not hist:
@@ -298,7 +288,6 @@ def main():
             shutil.rmtree(repo, ignore_errors=True)
         sys.exit(0)
 
-    # Choose baseline
     baseline = None
     if args.baseline_id is not None:
         baseline = fetch_by_id(conn, args.baseline_id)
@@ -307,7 +296,6 @@ def main():
             if is_temp and not args.keep_clone:
                 shutil.rmtree(repo, ignore_errors=True)
             sys.exit(2)
-        # Enforce same repo key
         same_key = (
             baseline["repo_identifier"] == identifier and
             baseline["label"] == args.label and
@@ -315,14 +303,13 @@ def main():
             int(baseline["include_untracked"]) == include_untracked_flag
         )
         if not same_key:
-            print("Error: baseline-id does not match current repo key (identifier/label/algo/include_untracked).", file=sys.stderr)
+            print("Error: baseline-id does not match current repo key.", file=sys.stderr)
             if is_temp and not args.keep_clone:
                 shutil.rmtree(repo, ignore_errors=True)
             sys.exit(2)
     else:
         baseline = fetch_previous(conn, identifier, args.label, args.algo, include_untracked_flag, mode=args.baseline_mode)
 
-    # Report header
     print(f"Repository: {toplevel}")
     print(f"Input:     {identifier}")
     print(f"Label:     {args.label or '(none)'}")
@@ -332,7 +319,6 @@ def main():
     print(f"INDEX tree:  {index_tree}")
     print(f"WORKING {args.algo}: {working_sum}\n")
 
-    # Compare to baseline (if any)
     changed = False
     if baseline is None:
         print("No baseline found for this repo key. Saving this scan as the baseline.")
@@ -355,7 +341,6 @@ def main():
         else:
             print("No changes vs baseline.")
 
-    # Show current working status (useful for local paths)
     status = git_status_porcelain(toplevel)
     if status:
         print("\nWorking tree status (vs HEAD):")
@@ -364,7 +349,6 @@ def main():
     else:
         print("\nWorking tree is clean.")
 
-    # Store current run
     row = {
         "ts_utc": int(time.time()),
         "repo_identifier": identifier,
@@ -389,7 +373,6 @@ def main():
     if is_temp and not args.keep_clone:
         shutil.rmtree(repo, ignore_errors=True)
 
-    # Exit code based on comparison outcome
     sys.exit(1 if changed else 0)
 
 if __name__ == "__main__":
