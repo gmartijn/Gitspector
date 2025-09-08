@@ -9,7 +9,7 @@
 
 **GitSpector** is a Python tool that:  
 - 🧮 Computes **checksums** of your repo (HEAD, INDEX, WORKING tree).  
-- 📦 Stores them in an **SQLite database** (default: `repo_checksum.db` in your working dir).  
+- 📦 Stores them in an **SQLite database** (default: `gitspector.db` in your working dir).  
 - 🔄 On rescan, **automatically compares** against previous runs.  
 - 📜 Keeps a **history of scans** so you can time-travel through your repo’s past.  
 - 🌍 Works with **local repos** or **remote URLs** (clones them automagically).  
@@ -41,8 +41,8 @@ Clone this repo, drop the script somewhere in your `$PATH`, or just run it direc
 ```bash
 git clone https://github.com/yourname/gitspector.git
 cd gitspector
-chmod +x repo_checksum_sqlite.py
-./repo_checksum_sqlite.py --help
+chmod +x gitspector.py
+./gitspector.py --help
 ```
 
 ---
@@ -51,38 +51,38 @@ chmod +x repo_checksum_sqlite.py
 
 ### 🔍 Scan a local repo
 ```bash
-./repo_checksum_sqlite.py .
+./gitspector.py .
 ```
 
 ### 🌍 Scan a remote repo (auto-clone)
 ```bash
-./repo_checksum_sqlite.py https://github.com/git/git.git
+./gitspector.py https://github.com/git/git.git
 ```
 
 ### 📦 Include untracked files
 ```bash
-./repo_checksum_sqlite.py . --include-untracked
+./gitspector.py . --include-untracked
 ```
 
 ### 🏷️ Use labels (keep prod vs dev separate)
 ```bash
-./repo_checksum_sqlite.py . --label prod
-./repo_checksum_sqlite.py . --label dev
+./gitspector.py . --label prod
+./gitspector.py . --label dev
 ```
 
 ### ⏮️ Compare against the first ever baseline
 ```bash
-./repo_checksum_sqlite.py . --baseline-mode first
+./gitspector.py . --baseline-mode first
 ```
 
 ### 🎯 Compare against a specific scan ID
 ```bash
-./repo_checksum_sqlite.py . --baseline-id 42
+./gitspector.py . --baseline-id 42
 ```
 
 ### 📜 Show history
 ```bash
-./repo_checksum_sqlite.py . --show-history
+./gitspector.py . --show-history
 ```
 
 ---
