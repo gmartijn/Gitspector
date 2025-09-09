@@ -1,3 +1,6 @@
 repo_checksum.db
 repo_checksum.db-shm
 repo_checksum.db-wal
+gitspector.db
+gitspector.db-shm
+gitspector.db-wal
