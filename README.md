@@ -1,7 +1,7 @@
 # 🛰️ GitSpector 🕵️‍♂️✨
 
-> **"Stare deep into your repos… and they stare back."**  
-> A checksum inspector, baseline tracker, and change sniffer for Git repositories. 🐙🔍
+> Some developers have a GitLab fetish… they say “fork me” and really mean it. 
+> GitSpector won’t kink-shame your workflow, it’ll just checksum it. 🔍
 
 ---
 
@@ -13,6 +13,8 @@
 - 🔄 On rescan, **automatically compares** against previous runs.  
 - 📜 Keeps a **history of scans** so you can time-travel through your repo’s past.  
 - 🌍 Works with **local repos** or **remote URLs** (clones them automagically).  
+- 🔐 Supports **private repos** (GitHub/GitLab) via **tokens** or **SSH keys**.  
+- ⚠️ Has a `--no-ssl` flag if your corporate Git server runs on a toaster with a self-signed cert.  
 
 Basically, it’s like `git status`… but with **cryptographic receipts** and an elephant’s memory. 🐘
 
@@ -21,6 +23,10 @@ Basically, it’s like `git status`… but with **cryptographic receipts** and a
 ## ✨ Features
 
 - 🔗 Works with **local paths** or **remote Git URLs** (SSH/HTTPS).  
+- 🔒 Supports **auth**:  
+  - GitHub/GitLab **Personal Access Tokens** (`--token` / `--token-env`).  
+  - **SSH keys** (`--ssh-key`, `--ssh-known-hosts`).  
+  - **Skip TLS verification** (`--no-ssl`).  
 - ⏱️ Auto-stores **each scan** in SQLite for posterity.  
 - 📊 Compare against:  
   - 🕒 **latest scan** (default)  
@@ -83,6 +89,37 @@ chmod +x gitspector.py
 ### 📜 Show history
 ```bash
 ./gitspector.py . --show-history
+```
+
+---
+
+## 🔐 Private Repos
+
+### GitHub (HTTPS token)
+```bash
+export GITHUB_TOKEN=ghp_************************************
+./gitspector.py https://github.com/acme/secret-repo.git   --token-env GITHUB_TOKEN --provider github
+```
+
+### GitLab (HTTPS token)
+```bash
+export GITLAB_TOKEN=glpat-*********************************
+./gitspector.py https://gitlab.com/acme/secret-repo.git   --token-env GITLAB_TOKEN --provider gitlab
+```
+
+### SSH key
+```bash
+./gitspector.py git@github.com:acme/secret-repo.git   --ssh-key ~/.ssh/id_ed25519   --ssh-known-hosts ~/.ssh/known_hosts
+```
+
+### Force HTTPS → SSH conversion
+```bash
+./gitspector.py https://github.com/acme/secret-repo.git   --prefer-ssh --ssh-key ~/.ssh/id_ed25519
+```
+
+### Disable SSL verification (⚠️ insecure)
+```bash
+./gitspector.py https://gitlab.internal.local/group/repo.git   --token-env GITLAB_TOKEN --provider gitlab --no-ssl
 ```
 
 ---
