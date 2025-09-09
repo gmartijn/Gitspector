@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 gitspector.py — compute & persist Git checksums; auto-compare on rescan; history + custom baselines.
-Now with private-repo auth for GitHub/GitLab via HTTPS token or SSH key.
+Now with private-repo auth for GitHub/GitLab (token or SSH) and --no-ssl to disable HTTPS cert verification.
 
 Usage:
   python gitspector.py <path-or-url> [--include-untracked] [--algo sha256]
@@ -13,18 +13,13 @@ Usage:
                        [--provider auto|github|gitlab]
                        [--prefer-ssh]
                        [--ssh-key PATH] [--ssh-known-hosts PATH] [--no-strict-host-key-checking]
+  # TLS:
+                       [--no-ssl]
 
-Key behavior:
-- <path-or-url> can be local path OR remote Git URL (ssh/https). URLs are cloned to a temp dir.
-- Stores a record in SQLite and compares against a baseline (latest/first/specific).
-- Default DB path: ./gitspector.db (current working directory).
-- Auth:
-  * HTTPS token (safe, easy): --token or --token-env; provider auto-detected or forced.
-    - GitHub:   https://x-access-token:<TOKEN>@github.com/owner/repo.git
-    - GitLab:   https://oauth2:<TOKEN>@gitlab.com/owner/repo.git
-  * SSH key: --ssh-key (optionally --ssh-known-hosts). Uses GIT_SSH_COMMAND. Works for git@... URLs.
-- Secrets are masked in output.
-- Exit codes: 0 unchanged, 1 changed, 2 error.
+Exit codes:
+  0 => unchanged vs baseline
+  1 => changed
+  2 => error
 """
 
 import hashlib
@@ -43,11 +38,12 @@ from typing import List, Tuple, Optional
 # ----------------------- Utils -----------------------
 
 def redact(s: str) -> str:
+    """Mask tokens or credentials when echoing URLs."""
     if not s:
         return s
-    # Hide anything that looks like scheme://user:pass@host or user:token@host
+    # Hide scheme://user:pass@host (mask pass)
     s = re.sub(r'(://[^:/@]+:)[^@]+@', r'\1***@', s)
-    # Hide long token-looking substrings (40+ hex/alnum)
+    # Hide long token-like chunks
     s = re.sub(r'([A-Za-z0-9_\-]{20,})', '***', s)
     return s
 
@@ -60,10 +56,9 @@ def guess_provider_from_url(url: str) -> str:
 
 def to_ssh_url_if_possible(url: str) -> Optional[str]:
     """
-    Convert https://HOST/owner/repo(.git)? to git@HOST:owner/repo.git
-    Returns None if it doesn't look like standard https format.
+    Convert https://HOST/owner/repo(.git)? -> git@HOST:owner/repo.git
     """
-    m = re.match(r'^https?://([^/]+)/([^/]+)/(.*?)(?:\.git)?$', url)
+    m = re.match(r'^https?://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?$', url)
     if not m:
         return None
     host, owner, repo = m.groups()
@@ -71,14 +66,13 @@ def to_ssh_url_if_possible(url: str) -> Optional[str]:
 
 def make_token_url(url: str, token: str, provider: str) -> str:
     """
-    Inject token into HTTPS URL according to provider convention.
-    GitHub requires username 'x-access-token'; GitLab uses 'oauth2'.
+    Inject token into HTTPS URL:
+      - GitHub: https://x-access-token:<TOKEN>@github.com/...
+      - GitLab: https://oauth2:<TOKEN>@gitlab.com/...
     """
     if not url.startswith("http"):
-        # Can't inject token into SSH URL
         return url
     username = "x-access-token" if provider == "github" else "oauth2"
-    # Insert 'https://USER:TOKEN@'
     m = re.match(r'^(https?://)(.*)$', url)
     if not m:
         return url
@@ -104,7 +98,7 @@ def get_head_tree(cwd: Path) -> str:
     try:
         return run_git(["rev-parse", "HEAD^{tree}"], cwd)
     except subprocess.CalledProcessError:
-        return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # Git's empty tree
+        return "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # Git's empty tree OID
 
 def get_index_tree(cwd: Path) -> str:
     return run_git(["write-tree"], cwd)
@@ -174,41 +168,31 @@ def git_status_porcelain(cwd: Path):
 
 # ----------------------- Cloning with Auth -----------------------
 
-def build_git_env(ssh_key: Optional[str], known_hosts: Optional[str], strict: bool) -> dict:
+def build_git_env(ssh_key: Optional[str], known_hosts: Optional[str], strict: bool, no_ssl: bool) -> dict:
     env = os.environ.copy()
     if ssh_key:
         cmd_parts = [f"ssh -i {shlex.quote(ssh_key)}"]
         if known_hosts:
             cmd_parts.append(f"-o UserKnownHostsFile={shlex.quote(known_hosts)}")
-        if strict:
-            cmd_parts.append("-o StrictHostKeyChecking=yes")
-        else:
-            cmd_parts.append("-o StrictHostKeyChecking=no")
+        cmd_parts.append("-o StrictHostKeyChecking=yes" if strict else "-o StrictHostKeyChecking=no")
         env["GIT_SSH_COMMAND"] = " ".join(cmd_parts)
+    if no_ssl:
+        # Equivalent to git -c http.sslVerify=false; applies to HTTPS operations
+        env["GIT_SSL_NO_VERIFY"] = "1"
     return env
 
 def clone_with_auth(url: str, dest: Path, token: Optional[str], provider: str,
                     prefer_ssh: bool, ssh_key: Optional[str], known_hosts: Optional[str],
-                    strict_host_key_checking: bool) -> None:
-    """
-    Clone using either:
-      - SSH (if URL is ssh OR prefer_ssh=True and https convertible)
-      - HTTPS with token (if token provided)
-      - Plain HTTPS otherwise
-    """
-    env = build_git_env(ssh_key, known_hosts, strict_host_key_checking)
+                    strict_host_key_checking: bool, no_ssl: bool) -> None:
+    env = build_git_env(ssh_key, known_hosts, strict_host_key_checking, no_ssl)
 
-    # Prefer SSH if requested and url is https convertible
+    # Prefer SSH if requested and URL is https-convertible
     if prefer_ssh and url.startswith("http"):
         ssh_url = to_ssh_url_if_possible(url)
-        if ssh_url:
-            url_to_use = ssh_url
-        else:
-            url_to_use = url
+        url_to_use = ssh_url or url
     else:
         url_to_use = url
 
-    # If https and token provided, inject token properly
     prov = provider if provider != "auto" else guess_provider_from_url(url_to_use)
     if url_to_use.startswith("http") and token:
         url_to_use = make_token_url(url_to_use, token, prov)
@@ -229,7 +213,8 @@ def clone_if_url(path_or_url: str,
                  prefer_ssh: bool,
                  ssh_key: Optional[str],
                  known_hosts: Optional[str],
-                 strict_host_key_checking: bool) -> Tuple[Path, bool, str]:
+                 strict_host_key_checking: bool,
+                 no_ssl: bool) -> Tuple[Path, bool, str]:
     """
     If input is a URL, clone to temp dir. Return (repo_path, is_temp, identifier).
     identifier is the original URL string (unmodified) or the absolute path.
@@ -245,6 +230,7 @@ def clone_if_url(path_or_url: str,
             ssh_key=ssh_key,
             known_hosts=known_hosts,
             strict_host_key_checking=strict_host_key_checking,
+            no_ssl=no_ssl,
         )
         return tmpdir, True, path_or_url
     else:
@@ -337,7 +323,7 @@ def iso_utc(ts: int) -> str:
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="Compute & store Git checksums; compare to history (with private-repo auth).")
+    ap = argparse.ArgumentParser(description="Compute & store Git checksums; compare to history (private-repo auth supported).")
     ap.add_argument("path_or_url", help="Local repo path OR remote Git URL.")
     ap.add_argument("--include-untracked", action="store_true", help="Include untracked (not ignored) files in working checksum.")
     ap.add_argument("--algo", default="sha256", help="Hash algorithm (sha256, sha1, blake2b, etc.).")
@@ -349,13 +335,14 @@ def main():
     ap.add_argument("--keep-clone", action="store_true", help="If input is a URL, keep the temp clone directory.")
 
     # Auth options
-    ap.add_argument("--token", help="Personal access token for HTTPS cloning (GitHub/GitLab). Avoid putting secrets in shell history; prefer --token-env.")
+    ap.add_argument("--token", help="Personal access token for HTTPS cloning (GitHub/GitLab). Prefer --token-env for safety.")
     ap.add_argument("--token-env", help="Environment variable name that holds the token (safer than --token).")
     ap.add_argument("--provider", choices=["auto", "github", "gitlab"], default="auto", help="Force token provider if auto-detection is wrong.")
-    ap.add_argument("--prefer-ssh", action="store_true", help="Prefer SSH when given an https URL (converts to git@host:owner/repo.git if possible).")
-    ap.add_argument("--ssh-key", help="Path to an SSH private key for cloning (sets GIT_SSH_COMMAND).")
-    ap.add_argument("--ssh-known-hosts", help="Path to a known_hosts file for SSH (with --ssh-key).")
+    ap.add_argument("--prefer-ssh", action="store_true", help="Prefer SSH for https URLs (convert to git@host:owner/repo.git if possible).")
+    ap.add_argument("--ssh-key", help="Path to SSH private key for cloning (sets GIT_SSH_COMMAND).")
+    ap.add_argument("--ssh-known-hosts", help="Path to known_hosts for SSH (with --ssh-key).")
     ap.add_argument("--no-strict-host-key-checking", action="store_true", help="Disable StrictHostKeyChecking for SSH (⚠️ less secure).")
+    ap.add_argument("--no-ssl", action="store_true", help="Disable SSL certificate verification for HTTPS cloning (⚠️ insecure).")
 
     args = ap.parse_args()
 
@@ -374,6 +361,7 @@ def main():
         ssh_key=args.ssh_key,
         known_hosts=args.ssh_known_hosts,
         strict_host_key_checking=strict,
+        no_ssl=args.no_ssl,
     )
 
     # Open DB
@@ -385,7 +373,7 @@ def main():
 
     include_untracked_flag = 1 if args.include_untracked else 0
 
-    # If not a repo and --show-history, we can still show history keyed by the identifier.
+    # If not a repo and --show-history, still allow history listing keyed by identifier
     if not in_git_repo(repo):
         if args.show_history:
             hist = list_history(conn, identifier, args.label, args.algo, include_untracked_flag)
@@ -455,7 +443,7 @@ def main():
     else:
         baseline = fetch_previous(conn, identifier, args.label, args.algo, include_untracked_flag, mode=args.baseline_mode)
 
-    # Report header (mask identifier if it might contain a token)
+    # Report header (mask identifier if it might include secrets)
     print(f"Repository: {toplevel}")
     print(f"Input:     {redact(identifier)}")
     print(f"Label:     {args.label or '(none)'}")
